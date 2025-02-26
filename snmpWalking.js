@@ -1,10 +1,10 @@
 /**
- * SNMP Walking Script
+ * SNMP Walking Script (No MIB)
  *
  * Purpose:
- * - Initiates an SNMP walk from a specified root OID on a target device.
- * - Builds a hierarchical tree representing the OID structure.
+ * - Initiates an SNMP walk from a specified root OID on a target device without relying on a MIB file.
  * - Logs SNMP varbind information (OID, type, value) to the console and writes it to a CSV file.
+ * - Logs progress periodically to ensure the walk is running efficiently and to track the number of OIDs processed.
  *
  * Usage:
  * - Update the configuration with the target device's IP address, community string, and root OID.
@@ -15,72 +15,70 @@ const snmp = require('net-snmp');
 
 // Configuration
 const monitor = {
-    ipAddress: '10.87.1.32',
+    ipAddress: '', // Should be an IP address, e.g. '192.168.50.57'
     port: '161',
-    communityString: 'tacos',
+    communityString: '', // A string, e.g. 'public'
     snmpVersion: '2c',
-    rootOid: '1.3.6.1', // This is pretty high level
-    mibDirectory: 'MIBs/ubnt', // Specify the directory containing MIB files
+    rootOid: '1.3.6.1' // Starting from the root OID
 };
 
-// Create a module store and load UBNT-MIB file
-const store = snmp.createModuleStore();
-const mibFile = 'UBNT-MIB.txt';
-console.log(`Loading MIB file: ${mibFile}`);
-store.loadFromFile(`${monitor.mibDirectory}/${mibFile}`);
-
-// Fetch MIB providers for the specified module
-const moduleName = 'UBNT-MIB'; // Adjust this according to your MIB
-const providers = store.getProvidersForModule(moduleName);
-
-// Create an agent
-const agent = snmp.createAgent({ disableAuthorization: true }, function (error, data) {});
-
-// Register the providers with the agent's MIB
-const mib = agent.getMib();
-mib.registerProviders(providers);
+// SNMP options
+const options = {
+    port: monitor.port,
+    retries: 2,
+    timeout: 2000,
+    version: snmp.Version2c,
+};
 
 // Create SNMP session
-const session = snmp.createSession(monitor.ipAddress, monitor.communityString, {
-    port: monitor.port,
-    retries: 1,
-    timeout: 1000,
-    version: snmp.Version2c,
-});
+const session = snmp.createSession(monitor.ipAddress, monitor.communityString, options);
 
-// Start SNMP walk from the specified OID
-session.walk(monitor.rootOid, 20, feedCb, doneCb);
+// Create writable stream for CSV output
+const csvStream = fs.createWriteStream('snmp_data.csv', { flags: 'a' });
+
+// Progress counter
+let varbindCount = 0;
+const logProgressInterval = 100; // Log progress every 100 varbinds
+
+console.log(`Starting SNMP walk from OID: ${monitor.rootOid} on ${monitor.ipAddress}`);
 
 // Function to handle SNMP walk feed callback
 function feedCb(varbinds) {
     for (const varbind of varbinds) {
         if (!snmp.isVarbindError(varbind) && varbind.value !== null && varbind.value !== undefined) {
-            let oidName;
-            try {
-                oidName = store.translate(varbind.oid, snmp.OidFormat.path);
-            } catch (error) {
-                console.error(`Error translating OID ${varbind.oid} to path format: ${error.message}`);
-                oidName = varbind.oid;
-            }
+            const oid = varbind.oid;
             const typeName = findType(varbind.type);
-            console.log(`OID: ${oidName}, Type: ${typeName}, Value: ${varbind.value}`);
-            const csvRow = `${varbind.oid},${oidName},${typeName},${varbind.value}\n`;
-            fs.appendFileSync('snmp_data.csv', csvRow);
+            const value = varbind.value;
+            console.log(`OID: ${oid}, Type: ${typeName}, Value: ${value}`);
+            const csvRow = `${oid},${typeName},${value}\n`;
+            csvStream.write(csvRow);
+            varbindCount++;
+            if (varbindCount % logProgressInterval === 0) {
+                console.log(`Processed ${varbindCount} varbinds so far...`);
+            }
+        } else {
+            console.error(`Error or null value for OID: ${varbind.oid}`);
         }
     }
 }
 
-// Function to handle SNMP walk done callback
+// Function to handle SNMP walk completion
 function doneCb(error) {
     if (error) {
-        console.error(error.toString());
+        console.error(`SNMP walk error: ${error.toString()}`);
     } else {
-        console.log('SNMP walk completed.');
+        console.log('SNMP walk completed successfully.');
     }
+    console.log(`Total varbinds processed: ${varbindCount}`);
+    csvStream.end();
+    session.close();
 }
 
 // Function to find the corresponding type name for a given value
 function findType(value) {
-    const typeName = Object.entries(snmp.ObjectType).find(([key, val]) => val === value);
-    return typeName ? typeName[0] : 'Unknown';
+    const typeEntry = Object.entries(snmp.ObjectType).find(([key, val]) => val === value);
+    return typeEntry ? typeEntry[0] : 'Unknown';
 }
+
+// Start the SNMP walk
+session.walk(monitor.rootOid, 20, feedCb, doneCb);
