@@ -1,18 +1,16 @@
 /**
- * SNMP Monitoring Script
+ * SNMP Monitoring Script with MIB Directory Integration
  *
  * Purpose:
  * - Establishes an SNMP session and agent using the net-snmp library to monitor network devices.
- * - Connects to a specified device using defined configuration parameters (IP address, port, community string, etc.).
- * - Sets SNMP options (e.g., retries, timeout, transport) to control communication with the SNMP agent.
- * - Defines a callback function to handle SNMP responses, logging data or errors to the console.
- * - Optionally supports loading a MIB file for enhanced SNMP functionality (currently commented out).
+ * - Loads all MIB files from a supplied MIB directory to enhance OID translation.
+ * - Initiates an SNMP walk from a specified root OID on the target device.
+ * - Logs SNMP varbind information (OID, translated OID name, type, value) to the console and writes it to a CSV file.
+ * - Logs progress periodically to track the number of OIDs processed.
  *
  * How to Use:
- * 1. Update the 'monitor' object with the target device's IP address, port, and community string.
- * 2. Adjust any SNMP options in the 'options' object if necessary.
- * 3. Uncomment and modify the MIB loading section if you need to load a MIB file.
- * 4. Run the script with Node.js (e.g., `node snmpMib.js`).
+ * 1. Update the 'monitor' object with the target device's IP address, port, community string, root OID, and MIB directory.
+ * 2. Run the script with Node.js (e.g., `node snmpMibDirectory.js`).
  *
  * Requirements:
  * - Node.js
@@ -23,13 +21,12 @@ const snmp = require('net-snmp');
 
 // Configuration
 const monitor = {
-    ipAddress: '', // Should be an IP address, e.g. '192.168.50.57'
-    port: '161',
-    communityString: '', // A string, e.g. 'public'
-    snmpVersion: '2c',
-    rootOid: '1.3.6.1',
-    snmpCondition: '>',
-    snmpControlValue: 80
+    ipAddress: '',       // Target device IP address (e.g. '192.168.50.52')
+    port: '161',         // SNMP port (default 161)
+    communityString: '', // SNMP community string (e.g. 'public')
+    snmpVersion: '2c',   // SNMP version
+    rootOid: '1.3.6.1',  // Root OID to start the walk
+    mibDirectory: ''     // Directory containing MIB files (e.g. 'MIBs/ubnt')
 };
 
 // SNMP options
@@ -53,18 +50,87 @@ const options = {
 // Create SNMP session
 const session = snmp.createSession(monitor.ipAddress, monitor.communityString, options);
 
-// Define a callback function to handle SNMP requests
-const callback = function (error, data) {
+// Create SNMP agent with an empty callback (errors will be logged during walk)
+const agent = snmp.createAgent(options, (error, data) => {
     if (error) {
-        console.error(error);
-    } else {
-        console.log(JSON.stringify(data, null, 2));
+        console.error('Agent error:', error);
     }
-};
+});
 
-// Create the SNMP agent with the options, callback, and MIB
-const agent = snmp.createAgent(options, callback);
+// Get the agent's MIB object
+const mib = agent.getMib();
 
-// Load the MIB file
-// const mib = agent.Mib();
-// mib.load('/mnt/c/Users/mattv/Downloads/MIBs_ODM_Sx200_Sx300_v1.4.7.2/CISCOSBmacmulticast.mib');
+// Load all MIB files from the specified directory
+try {
+    const mibFiles = fs.readdirSync(monitor.mibDirectory);
+    mibFiles.forEach(file => {
+        // Only process files with .mib or .txt extensions
+        if (file.match(/\.(mib|txt)$/i)) {
+            const filePath = `${monitor.mibDirectory}/${file}`;
+            console.log(`Loading MIB file: ${file}`);
+            try {
+                mib.load(filePath);
+            } catch (err) {
+                console.error(`Error loading MIB file ${file}: ${err.message}`);
+            }
+        }
+    });
+} catch (err) {
+    console.error(`Error reading MIB directory: ${err.message}`);
+}
+
+// Create a writable stream for CSV output
+const csvStream = fs.createWriteStream('snmp_data.csv', { flags: 'a' });
+
+// Progress counter
+let varbindCount = 0;
+const logProgressInterval = 100; // Log progress every 100 varbinds
+
+console.log(`Starting SNMP walk from OID: ${monitor.rootOid} on ${monitor.ipAddress}`);
+
+// Function to handle SNMP walk feed callback
+function feedCb(varbinds) {
+    for (const varbind of varbinds) {
+        if (!snmp.isVarbindError(varbind) && varbind.value !== null && varbind.value !== undefined) {
+            let oidName;
+            try {
+                // Use the loaded MIBs to translate the OID into a human-readable path
+                oidName = mib.translate(varbind.oid, snmp.OidFormat.path);
+            } catch (error) {
+                console.error(`Error translating OID ${varbind.oid}: ${error.message}`);
+                oidName = varbind.oid;
+            }
+            const typeName = findType(varbind.type);
+            console.log(`OID: ${varbind.oid}, Name: ${oidName}, Type: ${typeName}, Value: ${varbind.value}`);
+            const csvRow = `${varbind.oid},${oidName},${typeName},${varbind.value}\n`;
+            csvStream.write(csvRow);
+            varbindCount++;
+            if (varbindCount % logProgressInterval === 0) {
+                console.log(`Processed ${varbindCount} varbinds so far...`);
+            }
+        } else {
+            console.error(`Error or null value for OID: ${varbind.oid}`);
+        }
+    }
+}
+
+// Function to handle SNMP walk completion
+function doneCb(error) {
+    if (error) {
+        console.error(`SNMP walk error: ${error.toString()}`);
+    } else {
+        console.log('SNMP walk completed successfully.');
+    }
+    console.log(`Total varbinds processed: ${varbindCount}`);
+    csvStream.end();
+    session.close();
+}
+
+// Function to find the corresponding type name for a given value
+function findType(value) {
+    const typeEntry = Object.entries(snmp.ObjectType).find(([key, val]) => val === value);
+    return typeEntry ? typeEntry[0] : 'Unknown';
+}
+
+// Start the SNMP walk
+session.walk(monitor.rootOid, 20, feedCb, doneCb);
