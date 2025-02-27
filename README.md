@@ -50,7 +50,7 @@ Loads a specified MIB file and registers its providers with an SNMP agent. The s
 - **Usage:**
 Adjust the monitor object with the correct MIB directory, file, and module name. Run the corresponding script:
     ```sh
-    node <script_name>.js
+    node snmpMib.js
     ```
 
 ## Installation
@@ -61,8 +61,8 @@ Adjust the monitor object with the correct MIB directory, file, and module name.
 - Clone the Repository:
 
     ```sh
-    git clone https://github.com/yourusername/snmp-tools.git
-    cd snmp-tools
+    git clone https://github.com/mattv8/snmp-scripts.git
+    cd snmp-scripts
     ```
 
 - Install Dependencies:
